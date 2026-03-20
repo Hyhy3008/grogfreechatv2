@@ -158,46 +158,104 @@ ${currentSummary}
                 ? `\n\n--- TIN NHẮN SẮP BỊ XÓA ---\nUser: "${oldestPair[0]?.content}"\nAI: "${stripThink(oldestPair[1]?.content || "")}"`
                 : "";
 
-            // Khi overBudget: cắt bớt input tránh vượt max_tokens
-            const brainInput = isOverBudget
-                ? (currentSummary || "").slice(0, Math.floor(targetLength * 0.6))
-                : (currentSummary || "");
+            const memMaxTokens = Math.ceil(targetLength / 3) + 300;
 
-            const memoryMode = isOverBudget
-                ? `VƯỢT GIỚI HẠN: ${currentBrainSize}/${targetLength} ký tự. PHẢI nén xuống dưới ${targetLength}.\nHÀNH ĐỘNG BẮT BUỘC:\n- USER_PROFILE: 1 dòng tên+nghề+thích\n- CURRENT_GOAL: 1 dòng hoặc trống\n- KNOWLEDGE_GRAPH: tối đa 6 từ khóa quan trọng nhất\n- SHORT_TERM_LOG: tối đa 3 dòng dạng "- [chủ đề ngắn]"`
-                : `Còn ${targetLength - currentBrainSize} ký tự.\n- SHORT_TERM_LOG: tối đa 5 dòng dạng "- [chủ đề ngắn]" KHÔNG copy nguyên câu\n- Khi còn < 200 ký tự: gộp log cũ thành 1 dòng`;
+            // Helper gọi đúng provider memory
+            const callMemory = async (sysPrompt, userMsg) => {
+                if (useCerebrasMemory)
+                    return callCerebras("llama3.1-8b", [{role:"system",content:sysPrompt},{role:"user",content:userMsg}], 0.2, memMaxTokens);
+                if (useCFMemory)
+                    return callCF(userMsg, sysPrompt, [], targetCFModel, memMaxTokens);
+                return callGroq("llama-3.1-8b-instant", [{role:"system",content:sysPrompt},{role:"user",content:userMsg}], 0.2, memMaxTokens);
+            };
 
-            const memSysPrompt = `Bạn là Memory Manager. Giới hạn CỨNG: ${targetLength} ký tự.\nTRẠNG THÁI: ${currentBrainSize}/${targetLength} (${budgetUsedPct}%).\n${memoryMode}\n\nQUY TẮC TUYỆT ĐỐI:\n1. Output PHẢI <= ${targetLength} ký tự.\n2. SHORT_TERM_LOG: KHÔNG bê nguyên câu — chỉ ghi CHỦ ĐỀ ngắn.\n   ĐÚNG: "- Hỏi về du lịch Hà Nội"\n   SAI: "- User: tôi muốn đi... AI: Hà Nội có..."\n3. Ưu tiên: USER_PROFILE > KNOWLEDGE_GRAPH > log gần > log cũ.\n4. CHỈ trả về 4 section, KHÔNG thêm text nào khác.\n\nFORMAT:\n=== USER_PROFILE ===\n=== CURRENT_GOAL ===\n=== KNOWLEDGE_GRAPH ===\n=== SHORT_TERM_LOG ===`;
+            const FORMAT = `=== USER_PROFILE ===
+=== CURRENT_GOAL ===
+=== KNOWLEDGE_GRAPH ===
+=== SHORT_TERM_LOG ===`;
 
-            const memUserMsg = `BỘ NÃO HIỆN TẠI:\n${brainInput || '(trống)'}${evictedContext}\n\nHỘI THOẠI MỚI:\nUser: "${message}"\nAI: "${aiReplyClean.slice(0, 300)}"\n\nCập nhật bộ não. Output <= ${targetLength} ký tự.`;
+            const BASE_RULES = `QUY TẮC:
+1. Output PHẢI <= ${targetLength} ký tự — đếm kỹ.
+2. SHORT_TERM_LOG: chỉ ghi CHỦ ĐỀ ngắn, KHÔNG copy nguyên câu.
+   ĐÚNG: "- Hỏi về phở Hà Nội"  SAI: "- User: phở thế nào... AI: Phở là..."
+3. CHỈ trả về 4 section theo format, KHÔNG thêm text nào khác.
 
-            const memMaxTokens = Math.ceil(targetLength / 3) + 200;
+${FORMAT}`;
 
             try {
                 let memContent = "";
 
-                if (useCerebrasMemory) {
-                    memContent = await callCerebras(
-                        "llama3.1-8b",
-                        [{ role: "system", content: memSysPrompt }, { role: "user", content: memUserMsg }],
-                        0.2, memMaxTokens
-                    );
-                } else if (useCFMemory) {
-                    memContent = await callCF(memUserMsg, memSysPrompt, [], targetCFModel, memMaxTokens);
+                if (isOverBudget) {
+                    // ── BƯỚC NÉN KHẨN CẤP: 2 giai đoạn ──────────────────
+                    // Giai đoạn 1: Chỉ nén SHORT_TERM_LOG — xóa log cũ, giữ tinh túy
+                    const compressSysPrompt = `Bạn là Memory Compressor. Bộ não ĐANG QUÁ TẢI: ${currentBrainSize}/${targetLength} ký tự.
+
+NHIỆM VỤ DUY NHẤT: Viết lại bộ não với kích thước <= ${Math.floor(targetLength * 0.7)} ký tự.
+BẮT BUỘC:
+- USER_PROFILE: tối đa 1 dòng
+- CURRENT_GOAL: tối đa 1 dòng hoặc để trống  
+- KNOWLEDGE_GRAPH: tối đa 5 từ khóa quan trọng nhất, bỏ từ khóa ít liên quan
+- SHORT_TERM_LOG: tối đa 2 dòng gần nhất, XÓA HẾT log cũ
+
+${BASE_RULES}`;
+
+                    const compressUserMsg = `BỘ NÃO CẦN NÉN:
+${currentSummary}
+
+Viết lại bộ não đã nén <= ${Math.floor(targetLength * 0.7)} ký tự.`;
+
+                    const compressed = await callMemory(compressSysPrompt, compressUserMsg);
+
+                    // Giai đoạn 2: Cập nhật hội thoại mới vào bộ não đã nén
+                    const updateSysPrompt = `Bạn là Memory Manager. Giới hạn: ${targetLength} ký tự.
+CẬP NHẬT bộ não với hội thoại mới. Còn ${targetLength - (compressed||"").length} ký tự trống.
+${BASE_RULES}`;
+
+                    const updateUserMsg = `BỘ NÃO ĐÃ NÉN:
+${compressed || currentSummary.slice(0, Math.floor(targetLength*0.5))}
+
+HỘI THOẠI MỚI:
+User: "${message}"
+AI: "${aiReplyClean.slice(0, 200)}"
+
+Thêm vào SHORT_TERM_LOG. Output <= ${targetLength} ký tự.`;
+
+                    memContent = await callMemory(updateSysPrompt, updateUserMsg);
+
+                    // Fallback: nếu giai đoạn 2 lỗi thì dùng bộ não đã nén
+                    if (!memContent && compressed) memContent = compressed;
+
                 } else {
-                    memContent = await callGroq(
-                        "llama-3.1-8b-instant",
-                        [{ role: "system", content: memSysPrompt }, { role: "user", content: memUserMsg }],
-                        0.2, memMaxTokens
-                    );
+                    // ── CẬP NHẬT THƯỜNG ──────────────────────────────────
+                    const nearLimit = currentBrainSize > targetLength * 0.8;
+                    const updateMode = nearLimit
+                        ? `GẦN ĐẦY (${budgetUsedPct}%): hãy gộp log cũ thành 1 dòng tóm tắt trước khi thêm mới.`
+                        : `Còn ${targetLength - currentBrainSize} ký tự trống.`;
+
+                    const updateSysPrompt = `Bạn là Memory Manager. Giới hạn: ${targetLength} ký tự.
+TRẠNG THÁI: ${currentBrainSize}/${targetLength} (${budgetUsedPct}%). ${updateMode}
+- SHORT_TERM_LOG: tối đa 5 dòng gần nhất, XÓA log cũ hơn
+${BASE_RULES}`;
+
+                    const updateUserMsg = `BỘ NÃO HIỆN TẠI:
+${currentSummary || '(trống)'}${evictedContext}
+
+HỘI THOẠI MỚI:
+User: "${message}"
+AI: "${aiReplyClean.slice(0, 300)}"
+
+Cập nhật bộ não. Output <= ${targetLength} ký tự.`;
+
+                    memContent = await callMemory(updateSysPrompt, updateUserMsg);
                 }
 
-                if (memContent) {
+                if (memContent && memContent.trim()) {
                     newSummary = memContent.length <= targetLength
                         ? memContent
                         : memContent.slice(0, targetLength);
                 } else {
                     memoryUpdated = false;
+                    console.warn("Memory returned empty.");
                 }
             } catch (memError) {
                 memoryUpdated = false;
