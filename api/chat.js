@@ -151,6 +151,7 @@ ${currentSummary}
             const currentBrainSize = (currentSummary || "").length;
             const budgetUsedPct    = Math.round((currentBrainSize / targetLength) * 100);
             const isOverBudget     = currentBrainSize > targetLength;
+            const isNearLimit      = !isOverBudget && budgetUsedPct >= 80;
 
             const historyFull    = (history || []).length >= targetHistoryLimit;
             const oldestPair     = historyFull ? (history || []).slice(0, 2) : [];
@@ -159,6 +160,10 @@ ${currentSummary}
                 : "";
 
             const memMaxTokens = Math.ceil(targetLength / 3) + 300;
+
+            // Timestamp ngắn gọn: HH:MM dd/MM
+            const now = new Date();
+            const ts = `${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')} ${String(now.getDate()).padStart(2,'0')}/${String(now.getMonth()+1).padStart(2,'0')}`;
 
             // Helper gọi đúng provider memory
             const callMemory = async (sysPrompt, userMsg) => {
@@ -169,99 +174,109 @@ ${currentSummary}
                 return callGroq("llama-3.1-8b-instant", [{role:"system",content:sysPrompt},{role:"user",content:userMsg}], 0.2, memMaxTokens);
             };
 
-            const FORMAT = `=== USER_PROFILE ===
+            // Quy tắc SHORT_TERM_LOG dùng chung
+            const LOG_RULES = `SHORT_TERM_LOG — QUY TẮC BẮT BUỘC:
+- Mỗi dòng: "[HH:MM dd/MM] ý chính câu hỏi user" — KHÔNG copy nguyên câu
+- ĐÚNG: "[${ts}] Hỏi về phở Hà Nội"
+- SAI: "[${ts}] User: phở thế nào vậy? AI: Phở là món..."
+- Tối đa 5 dòng, giữ mới nhất`;
+
+            const BRAIN_FORMAT = `=== USER_PROFILE ===
 === CURRENT_GOAL ===
 === KNOWLEDGE_GRAPH ===
 === SHORT_TERM_LOG ===`;
 
-            const BASE_RULES = `QUY TẮC:
-1. Output PHẢI <= ${targetLength} ký tự — đếm kỹ.
-2. SHORT_TERM_LOG: chỉ ghi CHỦ ĐỀ ngắn, KHÔNG copy nguyên câu.
-   ĐÚNG: "- Hỏi về phở Hà Nội"  SAI: "- User: phở thế nào... AI: Phở là..."
-3. CHỈ trả về 4 section theo format, KHÔNG thêm text nào khác.
-
-${FORMAT}`;
+            // Hard fallback: xóa 50% log cũ dựa vào dòng đầu
+            const hardTruncateLog = (brain) => {
+                const logIdx = brain.indexOf("=== SHORT_TERM_LOG ===");
+                if (logIdx === -1) return brain.slice(0, targetLength);
+                const header = brain.slice(0, logIdx + "=== SHORT_TERM_LOG ===".length);
+                const logBody = brain.slice(logIdx + "=== SHORT_TERM_LOG ===".length);
+                const logLines = logBody.split("\n").filter(l => l.trim().startsWith("-"));
+                // Xóa 50% dòng cũ nhất (đầu mảng)
+                const kept = logLines.slice(Math.ceil(logLines.length * 0.5));
+                return (header + "\n" + kept.join("\n")).slice(0, targetLength);
+            };
 
             try {
                 let memContent = "";
 
                 if (isOverBudget) {
-                    // ── BƯỚC NÉN KHẨN CẤP: 2 giai đoạn ──────────────────
-                    // Giai đoạn 1: Chỉ nén SHORT_TERM_LOG — xóa log cũ, giữ tinh túy
-                    const compressSysPrompt = `Bạn là Memory Compressor. Bộ não ĐANG QUÁ TẢI: ${currentBrainSize}/${targetLength} ký tự.
-
-NHIỆM VỤ DUY NHẤT: Viết lại bộ não với kích thước <= ${Math.floor(targetLength * 0.7)} ký tự.
-BẮT BUỘC:
-- USER_PROFILE: tối đa 1 dòng
-- CURRENT_GOAL: tối đa 1 dòng hoặc để trống  
-- KNOWLEDGE_GRAPH: tối đa 5 từ khóa quan trọng nhất, bỏ từ khóa ít liên quan
-- SHORT_TERM_LOG: tối đa 2 dòng gần nhất, XÓA HẾT log cũ
-
-${BASE_RULES}`;
-
-                    const compressUserMsg = `BỘ NÃO CẦN NÉN:
-${currentSummary}
-
-Viết lại bộ não đã nén <= ${Math.floor(targetLength * 0.7)} ký tự.`;
-
-                    const compressed = await callMemory(compressSysPrompt, compressUserMsg);
-
-                    // Giai đoạn 2: Cập nhật hội thoại mới vào bộ não đã nén
-                    const updateSysPrompt = `Bạn là Memory Manager. Giới hạn: ${targetLength} ký tự.
-CẬP NHẬT bộ não với hội thoại mới. Còn ${targetLength - (compressed||"").length} ký tự trống.
-${BASE_RULES}`;
-
-                    const updateUserMsg = `BỘ NÃO ĐÃ NÉN:
-${compressed || currentSummary.slice(0, Math.floor(targetLength*0.5))}
+                    // ══ VƯỢT LIMIT: xóa 50% log cũ nhất trước, rồi thêm mới ══
+                    const truncated = hardTruncateLog(currentSummary);
+                    const sysPrompt = `Bạn là Memory Manager. Giới hạn: ${targetLength} ký tự.
+Bộ não vừa được xóa 50% log cũ. Còn ${targetLength - truncated.length} ký tự.
+Thêm hội thoại mới vào SHORT_TERM_LOG.
+${LOG_RULES}
+Output <= ${targetLength} ký tự. CHỈ trả về 4 section.
+${BRAIN_FORMAT}`;
+                    const userMsg = `BỘ NÃO SAU KHI XÓA LOG CŨ:
+${truncated}
 
 HỘI THOẠI MỚI:
-User: "${message}"
-AI: "${aiReplyClean.slice(0, 200)}"
+User hỏi: "${message}"
 
-Thêm vào SHORT_TERM_LOG. Output <= ${targetLength} ký tự.`;
+Thêm "[${ts}] ý chính" vào SHORT_TERM_LOG. Output <= ${targetLength} ký tự.`;
+                    memContent = await callMemory(sysPrompt, userMsg);
 
-                    memContent = await callMemory(updateSysPrompt, updateUserMsg);
+                    // Fallback nếu API lỗi
+                    if (!memContent?.trim()) {
+                        newSummary = truncated;
+                        memoryUpdated = true;
+                        console.warn("overBudget fallback: used hardTruncate only");
+                    }
 
-                    // Fallback: nếu giai đoạn 2 lỗi thì dùng bộ não đã nén
-                    if (!memContent && compressed) memContent = compressed;
+                } else if (isNearLimit) {
+                    // ══ GẦN ĐẦY 80%+: tóm tắt log cũ + thêm mới — 1 lần gọi ══
+                    const sysPrompt = `Bạn là Memory Manager. Giới hạn: ${targetLength} ký tự.
+⚠️ GẦN ĐẦY: ${currentBrainSize}/${targetLength} (${budgetUsedPct}%).
+HÀNH ĐỘNG TRONG LẦN NÀY:
+1. Tóm tắt các dòng log CŨ (dòng đầu tiên) thành 1 dòng ý chính ngắn gọn
+2. Giữ lại các dòng log MỚI (dòng cuối)
+3. Thêm hội thoại mới vào cuối log
+${LOG_RULES}
+Output <= ${targetLength} ký tự. CHỈ trả về 4 section.
+${BRAIN_FORMAT}`;
+                    const userMsg = `BỘ NÃO HIỆN TẠI:
+${currentSummary}${evictedContext}
+
+HỘI THOẠI MỚI:
+User hỏi: "${message}"
+
+Tóm tắt log cũ + thêm "[${ts}] ý chính" mới. Output <= ${targetLength} ký tự.`;
+                    memContent = await callMemory(sysPrompt, userMsg);
 
                 } else {
-                    // ── CẬP NHẬT THƯỜNG ──────────────────────────────────
-                    const nearLimit = currentBrainSize > targetLength * 0.8;
-                    const updateMode = nearLimit
-                        ? `GẦN ĐẦY (${budgetUsedPct}%): hãy gộp log cũ thành 1 dòng tóm tắt trước khi thêm mới.`
-                        : `Còn ${targetLength - currentBrainSize} ký tự trống.`;
-
-                    const updateSysPrompt = `Bạn là Memory Manager. Giới hạn: ${targetLength} ký tự.
-TRẠNG THÁI: ${currentBrainSize}/${targetLength} (${budgetUsedPct}%). ${updateMode}
-- SHORT_TERM_LOG: tối đa 5 dòng gần nhất, XÓA log cũ hơn
-${BASE_RULES}`;
-
-                    const updateUserMsg = `BỘ NÃO HIỆN TẠI:
+                    // ══ BÌNH THƯỜNG: cập nhật thêm vào ══
+                    const sysPrompt = `Bạn là Memory Manager. Giới hạn: ${targetLength} ký tự.
+Còn ${targetLength - currentBrainSize} ký tự (${100 - budgetUsedPct}% trống).
+${LOG_RULES}
+Output <= ${targetLength} ký tự. CHỈ trả về 4 section.
+${BRAIN_FORMAT}`;
+                    const userMsg = `BỘ NÃO HIỆN TẠI:
 ${currentSummary || '(trống)'}${evictedContext}
 
 HỘI THOẠI MỚI:
-User: "${message}"
-AI: "${aiReplyClean.slice(0, 300)}"
+User hỏi: "${message}"
 
-Cập nhật bộ não. Output <= ${targetLength} ký tự.`;
-
-                    memContent = await callMemory(updateSysPrompt, updateUserMsg);
+Thêm "[${ts}] ý chính" vào SHORT_TERM_LOG. Output <= ${targetLength} ký tự.`;
+                    memContent = await callMemory(sysPrompt, userMsg);
                 }
 
-                if (memContent && memContent.trim()) {
+                if (memContent?.trim()) {
                     newSummary = memContent.length <= targetLength
                         ? memContent
                         : memContent.slice(0, targetLength);
-                } else {
+                } else if (!newSummary || newSummary === currentSummary) {
                     memoryUpdated = false;
-                    console.warn("Memory returned empty.");
                 }
+
             } catch (memError) {
-                memoryUpdated = false;
-                console.error("Memory update error:", memError.message);
+                // Exception: xóa 50% log cũ để giải phóng
+                newSummary = hardTruncateLog(currentSummary);
+                memoryUpdated = true;
+                console.error("Memory exception, truncated log:", memError.message);
             }
-        }
 
         // ── BƯỚC 3: TRẢ KẾT QUẢ ─────────────────────────────────────────
         // Xác định provider thực tế đang tóm tắt bộ não
