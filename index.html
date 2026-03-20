@@ -443,7 +443,8 @@
             </div>
             <div class="brain-header">
                 <span>NỘI DUNG BỘ NÃO</span>
-                <div class="brain-status">
+                <div class="brain-status" style="display:flex;align-items:center;gap:8px;">
+                    <button onclick="resetBrain()" title="Xóa bộ não" style="background:#fee2e2;border:none;border-radius:6px;padding:3px 8px;font-size:11px;color:#991b1b;cursor:pointer;font-weight:600;">🗑 Reset</button>
                     <div class="brain-dot" id="brainDot"></div>
                     <span id="currLen" style="font-weight:400; color:#888; font-size:12px;">0 chars</span>
                 </div>
@@ -751,7 +752,11 @@
                     useCFChat,
                     useCFMemory,
                     useCerebrasChat,
-                    useCerebrasMemory
+                    useCerebrasMemory,
+                    clientTs: (() => {
+                        const n = new Date();
+                        return `${String(n.getHours()).padStart(2,'0')}:${String(n.getMinutes()).padStart(2,'0')} ${String(n.getDate()).padStart(2,'0')}/${String(n.getMonth()+1).padStart(2,'0')}`;
+                    })()
                 })
             });
 
@@ -863,9 +868,29 @@
     /* ─────────────── BRAIN UI ─────────────── */
     function updateBrainUI(text) {
         const len = text ? text.length : 0;
-        currLen.textContent = len + " chars";
+        const limit = parseInt(memLimitInput.value) || 2000;
+        const pct = Math.round((len / limit) * 100);
+
+        // Hiện % sử dụng
+        const color = pct >= 100 ? '#dc2626' : pct >= 80 ? '#d97706' : '#888';
+        currLen.innerHTML = `<span style="color:${color};font-weight:${pct>=80?'600':'400'}">${len} / ${limit} chars (${pct}%)</span>`;
+
         brainDisplay.textContent = text || "Chưa có dữ liệu...";
-        brainDot.className = 'brain-dot' + (len > 0 ? ' ok' : '');
+
+        // Dot màu theo mức
+        brainDot.className = pct >= 100 ? 'brain-dot warn'
+            : pct >= 80 ? 'brain-dot warn'
+            : len > 0 ? 'brain-dot ok'
+            : 'brain-dot';
+    }
+
+    function resetBrain() {
+        if (!confirm("Xóa toàn bộ bộ não? Chat history vẫn giữ nguyên.")) return;
+        currentSummary = "";
+        localStorage.removeItem('m');
+        updateBrainUI("");
+        hideMemoryWarning();
+        appendSystemMessage("🧹 Bộ não đã được reset. Sẽ tự xây dựng lại từ tin nhắn tiếp theo.");
     }
 
     function updateProviderLabels() {
