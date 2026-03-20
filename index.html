@@ -305,7 +305,7 @@
                     </div>
                     <div class="setting-row">
                         <label class="setting-label">🤖 Model Groq</label>
-                        <select id="modelSelect" class="full-width" onchange="syncModelInput(this.value)">
+                        <select id="modelSelect" class="full-width" onchange="syncModelInput(this.value); updateProviderLabels()">
                             <option value="llama-3.3-70b-versatile" selected>Llama 3.3 70B — Thông minh</option>
                             <option value="llama-3.1-8b-instant">Llama 3.1 8B — Nhanh</option>
                             <option value="qwen/qwen3-32b">Qwen 3 32B — Có suy luận</option>
@@ -330,7 +330,7 @@
                     <div class="setting-row">
                         <div class="toggle-row">
                             <span class="toggle-label">💬 Dùng CF làm AI trả lời</span>
-                            <label class="switch"><input type="checkbox" id="useCFChatToggle" onchange="onCFChatToggle(this.checked)"><span class="slider"></span></label>
+                            <label class="switch"><input type="checkbox" id="useCFChatToggle" onchange="onCFChatToggle(this.checked); updateProviderLabels()"><span class="slider"></span></label>
                         </div>
                         <div style="font-size:12px; color:#888; margin-top:4px;">
                             Dùng model CF 256K context · tự nhớ toàn bộ hội thoại · bộ não tóm tắt tự động tắt
@@ -339,7 +339,7 @@
                     <div class="setting-row" id="cfMemoryRow">
                         <div class="toggle-row">
                             <span class="toggle-label">🧠 Dùng CF làm bộ não tóm tắt</span>
-                            <label class="switch"><input type="checkbox" id="useCFMemoryToggle"><span class="slider"></span></label>
+                            <label class="switch"><input type="checkbox" id="useCFMemoryToggle" onchange="updateProviderLabels()"><span class="slider"></span></label>
                         </div>
                         <div style="font-size:12px; color:#888; margin-top:4px;">
                             Tắt nếu dùng CF chat (256K tự nhớ) · Bật nếu chỉ muốn CF tóm tắt thay Groq
@@ -371,7 +371,7 @@
                     <div class="setting-row">
                         <div class="toggle-row">
                             <span class="toggle-label">💬 Dùng Cerebras làm AI trả lời</span>
-                            <label class="switch"><input type="checkbox" id="useCerebrasChatToggle" onchange="onCerebrasChatToggle(this.checked)"><span class="slider"></span></label>
+                            <label class="switch"><input type="checkbox" id="useCerebrasChatToggle" onchange="onCerebrasChatToggle(this.checked); updateProviderLabels()"><span class="slider"></span></label>
                         </div>
                         <div style="font-size:12px; color:#888; margin-top:4px;">
                             Inference cực nhanh · ưu tiên hơn Groq và CF khi bật
@@ -380,7 +380,7 @@
                     <div class="setting-row">
                         <div class="toggle-row">
                             <span class="toggle-label">🧠 Dùng Cerebras làm bộ não tóm tắt</span>
-                            <label class="switch"><input type="checkbox" id="useCerebrasMemoryToggle"><span class="slider"></span></label>
+                            <label class="switch"><input type="checkbox" id="useCerebrasMemoryToggle" onchange="updateProviderLabels()"><span class="slider"></span></label>
                         </div>
                         <div style="font-size:12px; color:#888; margin-top:4px;">
                             Tóm tắt nhanh hơn Groq · dùng model nhẹ llama3.1-8b
@@ -430,6 +430,17 @@
             <div class="brain-warn-banner" id="brainWarnBanner">
                 <i class="fas fa-exclamation-triangle"></i>
                 <span id="brainWarnText">Bộ não chưa được cập nhật lần này.</span>
+            </div>
+            <!-- Provider status bar -->
+            <div style="display:flex; border-bottom:1px solid #ddd; flex-shrink:0;">
+                <div style="flex:1; padding:7px 12px; border-right:1px solid #ddd; font-size:12px;">
+                    <span style="color:#999; font-weight:600; text-transform:uppercase; letter-spacing:0.05em; font-size:10px;">CHAT</span><br>
+                    <span id="providerChatLabel" style="color:#333; font-weight:500;">Groq</span>
+                </div>
+                <div style="flex:1; padding:7px 12px; font-size:12px;">
+                    <span style="color:#999; font-weight:600; text-transform:uppercase; letter-spacing:0.05em; font-size:10px;">BỘ NÃO TÓM TẮT</span><br>
+                    <span id="providerMemoryLabel" style="color:#333; font-weight:500;">Groq</span>
+                </div>
             </div>
             <div class="brain-header">
                 <span>NỘI DUNG BỘ NÃO</span>
@@ -569,6 +580,7 @@
             currentSummary = "";
             showWelcome();
         }
+        updateProviderLabels();
     });
 
     function showWelcome() {
@@ -754,9 +766,11 @@
 
             // Luôn hiện nội dung bộ não thật
             if (data.memoryUpdated === false) {
-                const mode = data.mode || 'groq';
-                const reason = mode.includes('cf') ? 'Cloudflare gặp sự cố'
-                    : mode.includes('cerebras') ? 'Cerebras gặp sự cố'
+                // Xác định đúng provider đang làm bộ não tóm tắt
+                const useCFMem  = document.getElementById('useCFMemoryToggle').checked;
+                const useCerMem = document.getElementById('useCerebrasMemoryToggle').checked;
+                const reason = useCerMem ? 'Cerebras gặp sự cố'
+                    : useCFMem ? 'Cloudflare gặp sự cố'
                     : 'Groq gặp sự cố';
                 showMemoryWarning(reason);
             } else {
@@ -767,6 +781,7 @@
             history.push({ role: "user", content: text });
             history.push({ role: "assistant", content: data.response });
             saveState();
+            updateProviderLabels();
 
         } catch (error) {
             const isOverloaded = error.message.includes("429")
@@ -854,6 +869,49 @@
         currLen.textContent = len + " chars";
         brainDisplay.textContent = text || "Chưa có dữ liệu...";
         brainDot.className = 'brain-dot' + (len > 0 ? ' ok' : '');
+    }
+
+    function updateProviderLabels() {
+        const useCerebrasChat = document.getElementById('useCerebrasChatToggle').checked;
+        const useCFChat       = document.getElementById('useCFChatToggle').checked;
+        const useCFMem        = document.getElementById('useCFMemoryToggle').checked;
+        const useCerMem       = document.getElementById('useCerebrasMemoryToggle').checked;
+
+        const chatLabel = document.getElementById('providerChatLabel');
+        const memLabel  = document.getElementById('providerMemoryLabel');
+
+        // Chat provider
+        if (useCerebrasChat) {
+            const m = document.getElementById('cerebrasModelInput').value || 'qwen-3-235b';
+            chatLabel.textContent = '⚡ Cerebras — ' + m;
+            chatLabel.style.color = '#0f6e56';
+        } else if (useCFChat) {
+            const m = document.getElementById('cfModelInput').value || 'kimi-k2.5';
+            chatLabel.textContent = '☁️ Cloudflare — ' + m;
+            chatLabel.style.color = '#854f0b';
+        } else {
+            const m = document.getElementById('modelSelect').value === 'custom'
+                ? document.getElementById('modelCustomInput').value
+                : document.getElementById('modelSelect').value;
+            chatLabel.textContent = '🤖 Groq — ' + m;
+            chatLabel.style.color = '#185fa5';
+        }
+
+        // Memory provider
+        if (useCerMem) {
+            memLabel.textContent = '⚡ Cerebras — llama3.1-8b';
+            memLabel.style.color = '#0f6e56';
+        } else if (useCFMem) {
+            const m = document.getElementById('cfModelInput').value || 'kimi-k2.5';
+            memLabel.textContent = '☁️ Cloudflare — ' + m;
+            memLabel.style.color = '#854f0b';
+        } else {
+            const m = document.getElementById('modelSelect').value === 'custom'
+                ? document.getElementById('modelCustomInput').value
+                : document.getElementById('modelSelect').value;
+            memLabel.textContent = '🤖 Groq — ' + m;
+            memLabel.style.color = '#185fa5';
+        }
     }
 
     function showMemoryWarning(reason = '') {
