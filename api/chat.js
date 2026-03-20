@@ -205,15 +205,19 @@ ${currentSummary}
         }
 
         // ── BƯỚC 3: TRẢ KẾT QUẢ ─────────────────────────────────────────
+        // Xác định provider thực tế đang tóm tắt bộ não
+        const memoryProvider = useCFChat ? "none"  // CF 256K tự nhớ, không tóm tắt
+            : useCerebrasMemory ? "cerebras"
+            : useCFMemory ? "cloudflare"
+            : "groq";
+
         return res.status(200).json({
             response: aiReplyRaw,
             newSummary,
             memoryUpdated,
-            // Trả về flag để frontend biết đang dùng chế độ nào
+            memoryProvider,  // frontend dùng cái này để hiện đúng provider lỗi
             mode: useCerebrasChat ? "cerebras"
                 : useCFChat ? "cf-256k"
-                : useCerebrasMemory ? "groq+cerebras-memory"
-                : useCFMemory ? "groq+cf-memory"
                 : "groq"
         });
 
