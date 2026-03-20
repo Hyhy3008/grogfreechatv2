@@ -1,0 +1,167 @@
+// File: api/chat.js
+
+export default async function handler(req, res) {
+    if (req.method !== 'POST') {
+        return res.status(405).json({ error: 'Method Not Allowed' });
+    }
+
+    const GROQ_API_KEY = process.env.GROQ_API_KEY;
+    const CF_WORKER_URL = "https://muddy-paper-3417.nhatanhd50.workers.dev/";
+    const CF_API_KEY    = "12345678";
+
+    // ── CỔNG LỌC: strip <think> khỏi MỌI output trước khi dùng ──────────
+    const stripThink = (text = "") => {
+        if (!text.includes("<think>")) return text.trim();
+        return text.replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
+    };
+
+    // ── HELPER: gọi Groq ──────────────────────────────────────────────────
+    const callGroq = async (model, messages, temperature = 0.7, max_tokens = 2048) => {
+        const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+            method: "POST",
+            headers: { "Authorization": `Bearer ${GROQ_API_KEY}`, "Content-Type": "application/json" },
+            body: JSON.stringify({ model, messages, temperature, max_tokens })
+        });
+        const data = await res.json();
+        if (data.error) throw new Error(data.error.message);
+        return stripThink(data.choices?.[0]?.message?.content || "");
+    };
+
+    // ── HELPER: gọi CF Worker ─────────────────────────────────────────────
+    const callCF = async (prompt, systemPrompt, history = [], model, max_tokens = 2048) => {
+        const res = await fetch(CF_WORKER_URL, {
+            method: "POST",
+            headers: { "Authorization": `Bearer ${CF_API_KEY}`, "Content-Type": "application/json" },
+            body: JSON.stringify({ prompt, systemPrompt, history, model, max_tokens })
+        });
+        if (!res.ok) throw new Error(`CF Worker HTTP ${res.status}`);
+        const data = await res.json();
+        if (data.error) throw new Error(data.error);
+        return stripThink(data.response || "");
+    };
+
+    try {
+        const {
+            message,
+            history,
+            currentSummary,
+            maxMemoryLength,
+            model,           // Groq model name
+            cfModel,         // CF model name (tự điền)
+            historyLimit,
+            useCFChat,       // boolean: dùng CF làm AI chat
+            useCFMemory,     // boolean: dùng CF làm bộ não tóm tắt
+        } = req.body;
+
+        const targetGroqModel    = model || "llama-3.3-70b-versatile";
+        const targetCFModel      = cfModel || "@cf/moonshotai/kimi-k2.5";
+        const targetLength       = maxMemoryLength || 2000;
+        const targetHistoryLimit = historyLimit || 10;
+        const tinyHistory        = (history || []).slice(-targetHistoryLimit);
+
+        // ── BƯỚC 1: AI TRẢ LỜI ───────────────────────────────────────────
+        // Nếu useCFChat = true → dùng CF Worker với 256K context
+        // → truyền TOÀN BỘ history (không slice) vì model tự nhớ
+        // Nếu useCFChat = false → dùng Groq như cũ
+
+        const chatSystemPrompt = `VAI TRÒ: Trợ lý AI Thông Minh & Chuyên Nghiệp.\n\n--- DỮ LIỆU BỘ NHỚ ---\n${currentSummary || "Chưa có dữ liệu."}\n----------------------\n\nQUY TẮC:\n1. [BỘ NHỚ] = những gì User & AI đã nói. [KIẾN THỨC] = hiểu biết về thế giới.\n2. Hỏi quá khứ → nhìn bộ nhớ, trả lời CÓ/CHƯA.\n3. Hỏi kiến thức → trả lời chi tiết.\n4. Phong cách: tự tin, ngắn gọn.`;
+
+        let aiReplyRaw = "";
+
+        if (useCFChat) {
+            // CF 256K: truyền full history, không cần inject bộ não vào system prompt
+            const fullHistory = (history || []);
+            aiReplyRaw = await callCF(message, chatSystemPrompt, fullHistory, targetCFModel, 2048);
+        } else {
+            // Groq: dùng tinyHistory + bộ não inject vào system prompt
+            aiReplyRaw = await callGroq(
+                targetGroqModel,
+                [{ role: "system", content: chatSystemPrompt }, ...tinyHistory, { role: "user", content: message }],
+                0.7, 2048
+            );
+        }
+
+        const aiReplyClean = stripThink(aiReplyRaw);
+
+        // ── BƯỚC 2: CẬP NHẬT BỘ NÃO ─────────────────────────────────────
+        // Nếu useCFChat = true → CF tự nhớ 256K, KHÔNG cần bộ não tóm tắt
+        // Nếu useCFMemory = true → dùng CF Worker để tóm tắt
+        // Nếu cả 2 false → dùng Groq model để tóm tắt (như cũ)
+
+        let newSummary    = currentSummary;
+        let memoryUpdated = true;
+
+        if (useCFChat) {
+            // CF 256K tự nhớ — bỏ qua bộ não hoàn toàn
+            memoryUpdated = true; // không cần update, context đã đủ
+        } else {
+            // Cần tóm tắt bộ não
+            const currentBrainSize = (currentSummary || "").length;
+            const budgetUsedPct    = Math.round((currentBrainSize / targetLength) * 100);
+            const isOverBudget     = currentBrainSize > targetLength;
+
+            const historyFull    = (history || []).length >= targetHistoryLimit;
+            const oldestPair     = historyFull ? (history || []).slice(0, 2) : [];
+            const evictedContext = oldestPair.length === 2
+                ? `\n\n--- TIN NHẮN SẮP BỊ XÓA ---\nUser: "${oldestPair[0]?.content}"\nAI: "${stripThink(oldestPair[1]?.content || "")}"`
+                : "";
+
+            const memoryMode = isOverBudget
+                ? `KHẨN: bộ não ${currentBrainSize} ký tự, VƯỢT giới hạn ${targetLength}. BẮT BUỘC cắt giảm:\n- USER_PROFILE: tên + nghề + sở thích (tối đa 2 dòng)\n- CURRENT_GOAL: 1 câu hoặc trống\n- KNOWLEDGE_GRAPH: tối đa 8 từ khóa\n- SHORT_TERM_LOG: tối đa 3 dòng gần nhất`
+                : `CẬP NHẬT: còn ${targetLength - currentBrainSize} ký tự (${100 - budgetUsedPct}% trống).\n- SHORT_TERM_LOG: tối đa 5 dòng gần nhất\n- Khi còn < 200 ký tự: gộp/cắt log cũ chủ động`;
+
+            const memSysPrompt = `Bạn là Memory Manager. Giới hạn cứng: ${targetLength} ký tự.\nTRẠNG THÁI: ${currentBrainSize}/${targetLength} (${budgetUsedPct}%).\n${memoryMode}\n\nQUY TẮC:\n1. Output PHẢI <= ${targetLength} ký tự.\n2. Ưu tiên: USER_PROFILE > KNOWLEDGE_GRAPH > log gần > log cũ.\n3. CHỈ trả về 4 section, KHÔNG thêm text nào khác.\n\nFORMAT:\n=== USER_PROFILE ===\n=== CURRENT_GOAL ===\n=== KNOWLEDGE_GRAPH ===\n=== SHORT_TERM_LOG ===`;
+
+            const memUserMsg = `BỘ NÃO HIỆN TẠI:\n${currentSummary || '(trống)'}${evictedContext}\n\nHỘI THOẠI VỪA XẢY RA:\nUser: "${message}"\nAI: "${aiReplyClean}"\n\nCập nhật bộ não. Output <= ${targetLength} ký tự.`;
+
+            try {
+                let memContent = "";
+
+                if (useCFMemory) {
+                    // Dùng CF Worker để tóm tắt
+                    memContent = await callCF(
+                        memUserMsg,
+                        memSysPrompt,
+                        [],
+                        targetCFModel,
+                        1024
+                    );
+                } else {
+                    // Dùng Groq — tránh reasoning model để không ra <think>
+                    const memModel = targetGroqModel.includes("qwen") || targetGroqModel.includes("deepseek")
+                        ? "llama-3.3-70b-versatile"
+                        : targetGroqModel;
+                    memContent = await callGroq(
+                        memModel,
+                        [{ role: "system", content: memSysPrompt }, { role: "user", content: memUserMsg }],
+                        0.2, 1024
+                    );
+                }
+
+                if (memContent) {
+                    newSummary = memContent.length <= targetLength
+                        ? memContent
+                        : memContent.slice(0, targetLength);
+                } else {
+                    memoryUpdated = false;
+                }
+            } catch (memError) {
+                memoryUpdated = false;
+                console.error("Memory update error:", memError.message);
+            }
+        }
+
+        // ── BƯỚC 3: TRẢ KẾT QUẢ ─────────────────────────────────────────
+        return res.status(200).json({
+            response: aiReplyRaw,
+            newSummary,
+            memoryUpdated,
+            // Trả về flag để frontend biết đang dùng chế độ nào
+            mode: useCFChat ? "cf-256k" : useCFMemory ? "groq+cf-memory" : "groq"
+        });
+
+    } catch (error) {
+        console.error("API Error:", error);
+        return res.status(500).json({ error: error.message });
+    }
+}
