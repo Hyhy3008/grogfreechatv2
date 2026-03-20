@@ -364,6 +364,44 @@
                 </div>
             </div>
 
+            <!-- CEREBRAS -->
+            <div class="settings-section">
+                <div class="settings-section-title">Cerebras AI — Siêu nhanh</div>
+                <div class="settings-box">
+                    <div class="setting-row">
+                        <div class="toggle-row">
+                            <span class="toggle-label">💬 Dùng Cerebras làm AI trả lời</span>
+                            <label class="switch"><input type="checkbox" id="useCerebrasChatToggle" onchange="onCerebrasChatToggle(this.checked)"><span class="slider"></span></label>
+                        </div>
+                        <div style="font-size:12px; color:#888; margin-top:4px;">
+                            Inference cực nhanh · ưu tiên hơn Groq và CF khi bật
+                        </div>
+                    </div>
+                    <div class="setting-row">
+                        <div class="toggle-row">
+                            <span class="toggle-label">🧠 Dùng Cerebras làm bộ não tóm tắt</span>
+                            <label class="switch"><input type="checkbox" id="useCerebrasMemoryToggle"><span class="slider"></span></label>
+                        </div>
+                        <div style="font-size:12px; color:#888; margin-top:4px;">
+                            Tóm tắt nhanh hơn Groq · dùng model nhẹ llama3.1-8b
+                        </div>
+                    </div>
+                    <div class="setting-row">
+                        <label class="setting-label">🖥️ Model Cerebras</label>
+                        <select id="cerebrasModelSuggest" class="full-width" onchange="syncCerebrasModelInput(this.value)">
+                            <option value="qwen-3-235b-a22b-instruct-2507">Qwen 3 235B A22B — Mạnh nhất ⭐</option>
+                            <option value="gpt-oss-120b">GPT-OSS 120B — Cân bằng</option>
+                            <option value="llama3.1-8b">Llama 3.1 8B — Nhanh nhất</option>
+                            <option value="custom">✏️ Tự nhập tên model...</option>
+                        </select>
+                        <input type="text" id="cerebrasModelInput" class="full-width"
+                            style="margin-top:8px; padding:9px 12px; border:1px solid #ccc; border-radius:8px; font-size:13px; font-family:monospace; outline:none;"
+                            placeholder="qwen-3-235b-a22b-instruct-2507"
+                            value="qwen-3-235b-a22b-instruct-2507">
+                    </div>
+                </div>
+            </div>
+
             <!-- BỘ NHỚ -->
             <div class="settings-section" id="memorySettingsSection">
                 <div class="settings-section-title">Bộ nhớ & Ngữ cảnh</div>
@@ -480,6 +518,24 @@
 
     function getCFModel() {
         return cfModelInput.value.trim() || '@cf/moonshotai/kimi-k2.5';
+    }
+
+    function syncCerebrasModelInput(val) {
+        const input = document.getElementById('cerebrasModelInput');
+        if (val === 'custom') { input.value = ''; input.focus(); }
+        else input.value = val;
+    }
+
+    function onCerebrasChatToggle(checked) {
+        if (checked) {
+            // Cerebras bật → tắt CF chat (ưu tiên Cerebras)
+            document.getElementById('useCFChatToggle').checked = false;
+            onCFChatToggle(false);
+        }
+    }
+
+    function getCerebrasModel() {
+        return document.getElementById('cerebrasModelInput').value.trim() || 'qwen-3-235b-a22b-instruct-2507';
     }
 
     /* ─────────────── LOAD STATE ─────────────── */
@@ -630,11 +686,13 @@
         try {
             const limit  = parseInt(memLimitInput.value) || 2000;
             const hLimit = parseInt(historyLimitInput.value) || 10;
-            const useCFChat   = useCFChatToggle.checked;
-            const useCFMemory = useCFMemoryToggle.checked;
+            const useCFChat        = document.getElementById('useCFChatToggle').checked;
+            const useCFMemory      = document.getElementById('useCFMemoryToggle').checked;
+            const useCerebrasChat  = document.getElementById('useCerebrasChatToggle').checked;
+            const useCerebrasMemory= document.getElementById('useCerebrasMemoryToggle').checked;
 
-            // CF 256K: truyền full history, Groq: slice theo limit
-            const historyToSend = useCFChat ? history : history.slice(-hLimit);
+            // Cerebras/CF 256K: full history; Groq: slice theo limit
+            const historyToSend = (useCerebrasChat || useCFChat) ? history : history.slice(-hLimit);
 
             const res = await fetch(API_URL, {
                 method: "POST",
@@ -647,8 +705,11 @@
                     historyLimit: hLimit,
                     model: currentModel,
                     cfModel: getCFModel(),
+                    cerebrasModel: getCerebrasModel(),
                     useCFChat,
-                    useCFMemory
+                    useCFMemory,
+                    useCerebrasChat,
+                    useCerebrasMemory
                 })
             });
 
@@ -659,7 +720,10 @@
 
             if (data.newSummary) currentSummary = data.newSummary;
 
-            if (data.mode === 'cf-256k') {
+            if (data.mode === 'cerebras') {
+                hideMemoryWarning();
+                updateBrainUI('⚡ Chế độ Cerebras — inference siêu nhanh.\nBộ não: ' + (data.memoryUpdated ? 'đã cập nhật' : 'giữ nguyên'));
+            } else if (data.mode === 'cf-256k') {
                 // CF 256K mode — bộ não không cần tóm tắt
                 hideMemoryWarning();
                 updateBrainUI("⚡ Chế độ CF 256K — model tự nhớ toàn bộ hội thoại.\nBộ não tóm tắt không cần thiết.");
