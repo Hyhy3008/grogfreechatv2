@@ -180,12 +180,9 @@ ${currentSummary}
                     // CF Worker để tóm tắt
                     memContent = await callCF(memUserMsg, memSysPrompt, [], targetCFModel, 1024);
                 } else {
-                    // Groq — tránh reasoning model
-                    const memModel = targetGroqModel.includes("qwen") || targetGroqModel.includes("deepseek")
-                        ? "llama-3.3-70b-versatile"
-                        : targetGroqModel;
+                    // Groq memory luôn dùng 8B — nhẹ, nhanh, không ảnh hưởng rate limit chat
                     memContent = await callGroq(
-                        memModel,
+                        "llama-3.1-8b-instant",
                         [{ role: "system", content: memSysPrompt }, { role: "user", content: memUserMsg }],
                         0.2, 1024
                     );
