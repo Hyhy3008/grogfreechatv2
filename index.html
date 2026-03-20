@@ -668,11 +668,12 @@
         loading.style.display = 'block';
         scrollToBottom();
 
-        const selectedModel = getGroqModel();
         const useAutoSwitch = autoSwitchToggle.checked;
 
         try {
-            await sendWithFallback(text, selectedModel, useAutoSwitch, new Set());
+            // Xây dựng provider queue theo thứ tự ưu tiên dựa trên toggle đang bật
+            const providerQueue = buildProviderQueue();
+            await sendWithProviderFallback(text, providerQueue, useAutoSwitch, 0);
         } finally {
             loading.style.display = 'none';
             if (!isWTMode) setInputEnabled(true);
@@ -680,18 +681,48 @@
         }
     }
 
-    async function sendWithFallback(text, currentModel, autoSwitch, triedModels) {
-        triedModels.add(currentModel);
+    // Xây dựng provider queue:
+    // - Nếu Cerebras bật → dùng Cerebras, fallback Groq
+    // - Nếu CF bật → dùng CF, fallback Groq
+    // - Mặc định → chỉ Groq (CF và Cerebras tắt)
+    function buildProviderQueue() {
+        const queue = [];
+        const useCerebrasChat = document.getElementById('useCerebrasChatToggle').checked;
+        const useCFChat       = document.getElementById('useCFChatToggle').checked;
+
+        if (useCerebrasChat) {
+            queue.push({ name: 'Cerebras', type: 'cerebras' });
+        } else if (useCFChat) {
+            queue.push({ name: 'Cloudflare', type: 'cf' });
+        }
+
+        // Groq luôn là fallback cuối — thử lần lượt từng model
+        const groqModels = Array.from(modelSelect.options)
+            .map(o => o.value)
+            .filter(v => v !== 'custom');
+        groqModels.forEach(m => queue.push({ name: `Groq (${m})`, type: 'groq', model: m }));
+
+        return queue;
+    }
+
+    async function sendWithProviderFallback(text, queue, autoSwitch, idx) {
+        if (idx >= queue.length) {
+            appendSystemMessage("❌ Tất cả provider đều quá tải. Thử lại sau.");
+            return;
+        }
+
+        const provider = queue[idx];
 
         try {
             const limit  = parseInt(memLimitInput.value) || 2000;
             const hLimit = parseInt(historyLimitInput.value) || 10;
-            const useCFChat        = document.getElementById('useCFChatToggle').checked;
-            const useCFMemory      = document.getElementById('useCFMemoryToggle').checked;
-            const useCerebrasChat  = document.getElementById('useCerebrasChatToggle').checked;
-            const useCerebrasMemory= document.getElementById('useCerebrasMemoryToggle').checked;
+            const useCFMemory       = document.getElementById('useCFMemoryToggle').checked;
+            const useCerebrasMemory = document.getElementById('useCerebrasMemoryToggle').checked;
 
-            // Cerebras/CF 256K: full history; Groq: slice theo limit
+            const useCerebrasChat = provider.type === 'cerebras';
+            const useCFChat       = provider.type === 'cf';
+            const currentModel    = provider.type === 'groq' ? provider.model : getGroqModel();
+
             const historyToSend = (useCerebrasChat || useCFChat) ? history : history.slice(-hLimit);
 
             const res = await fetch(API_URL, {
@@ -717,21 +748,14 @@
             if (data.error) throw new Error(data.error);
 
             appendMessage(data.response, 'ai', true);
-
-            if (data.newSummary) currentSummary = data.newSummary;
-
-            if (data.mode === 'cerebras') {
-                hideMemoryWarning();
-                updateBrainUI('⚡ Chế độ Cerebras — inference siêu nhanh.\nBộ não: ' + (data.memoryUpdated ? 'đã cập nhật' : 'giữ nguyên'));
-            } else if (data.mode === 'cf-256k') {
-                // CF 256K mode — bộ não không cần tóm tắt
-                hideMemoryWarning();
-                updateBrainUI("⚡ Chế độ CF 256K — model tự nhớ toàn bộ hội thoại.\nBộ não tóm tắt không cần thiết.");
-            } else {
-                if (data.memoryUpdated === false) showMemoryWarning();
-                else hideMemoryWarning();
-                updateBrainUI(currentSummary);
+            if (data.newSummary) {
+                currentSummary = data.newSummary;
             }
+
+            // Luôn hiện nội dung bộ não thật — mode chỉ ảnh hưởng dot/banner
+            if (data.memoryUpdated === false) showMemoryWarning();
+            else hideMemoryWarning();
+            updateBrainUI(currentSummary);
 
             history.push({ role: "user", content: text });
             history.push({ role: "assistant", content: data.response });
@@ -740,31 +764,19 @@
         } catch (error) {
             const isOverloaded = error.message.includes("429")
                 || error.message.toLowerCase().includes("over capacity")
-                || error.message.toLowerCase().includes("rate limit");
+                || error.message.toLowerCase().includes("rate limit")
+                || error.message.toLowerCase().includes("neurons")
+                || error.message.toLowerCase().includes("quota");
 
-            if (isOverloaded && autoSwitch) {
-                const nextModel = getNextUntried(currentModel, triedModels);
-                if (nextModel) {
-                    appendSystemMessage(`⚠️ ${currentModel} quá tải → chuyển sang ${nextModel}...`);
-                    modelSelect.value = nextModel;
-                    await sendWithFallback(text, nextModel, true, triedModels);
-                    return;
-                } else {
-                    // FIX: đã thử hết model — không loop vô tận
-                    appendSystemMessage("❌ Tất cả model đều quá tải. Vui lòng thử lại sau.");
-                    return;
-                }
+            if (isOverloaded && autoSwitch && idx + 1 < queue.length) {
+                const next = queue[idx + 1];
+                appendSystemMessage(`⚠️ ${provider.name} quá tải → thử ${next.name}...`);
+                await sendWithProviderFallback(text, queue, autoSwitch, idx + 1);
+                return;
             }
 
-            // Ném lại để finally trong sendMessage bắt
             appendSystemMessage("❌ " + error.message);
         }
-    }
-
-    // FIX: chỉ lấy model chưa thử trong turn này
-    function getNextUntried(curr, tried) {
-        const opts = Array.from(modelSelect.options).map(o => o.value);
-        return opts.find(o => !tried.has(o)) || null;
     }
 
     /* ─────────────── APPEND MESSAGE ─────────────── */
