@@ -307,7 +307,6 @@
                         <label class="setting-label">🤖 Model Groq</label>
                         <select id="modelSelect" class="full-width" onchange="syncModelInput(this.value); updateProviderLabels()">
                             <option value="llama-3.3-70b-versatile" selected>Llama 3.3 70B — Thông minh</option>
-                            <option value="llama-3.1-8b-instant">Llama 3.1 8B — Nhanh</option>
                             <option value="qwen/qwen3-32b">Qwen 3 32B — Có suy luận</option>
                             <option value="meta-llama/llama-4-scout-17b-16e-instruct">Llama 4 Scout 17B</option>
                             <option value="moonshotai/kimi-k2-instruct-0905">Kimi k2 (0905)</option>
@@ -904,10 +903,7 @@
             memLabel.textContent = '☁️ Cloudflare — ' + m;
             memLabel.style.color = '#854f0b';
         } else {
-            const m = document.getElementById('modelSelect').value === 'custom'
-                ? document.getElementById('modelCustomInput').value
-                : document.getElementById('modelSelect').value;
-            memLabel.textContent = '🤖 Groq — ' + m;
+            memLabel.textContent = '🤖 Groq — llama-3.1-8b-instant';
             memLabel.style.color = '#185fa5';
         }
     }
