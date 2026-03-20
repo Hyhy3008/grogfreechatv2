@@ -429,7 +429,7 @@
         <div id="brainPanel">
             <div class="brain-warn-banner" id="brainWarnBanner">
                 <i class="fas fa-exclamation-triangle"></i>
-                <span>Bộ não chưa được cập nhật lần này — Cloudflare gặp sự cố.</span>
+                <span id="brainWarnText">Bộ não chưa được cập nhật lần này.</span>
             </div>
             <div class="brain-header">
                 <span>NỘI DUNG BỘ NÃO</span>
@@ -752,9 +752,16 @@
                 currentSummary = data.newSummary;
             }
 
-            // Luôn hiện nội dung bộ não thật — mode chỉ ảnh hưởng dot/banner
-            if (data.memoryUpdated === false) showMemoryWarning();
-            else hideMemoryWarning();
+            // Luôn hiện nội dung bộ não thật
+            if (data.memoryUpdated === false) {
+                const mode = data.mode || 'groq';
+                const reason = mode.includes('cf') ? 'Cloudflare gặp sự cố'
+                    : mode.includes('cerebras') ? 'Cerebras gặp sự cố'
+                    : 'Groq gặp sự cố';
+                showMemoryWarning(reason);
+            } else {
+                hideMemoryWarning();
+            }
             updateBrainUI(currentSummary);
 
             history.push({ role: "user", content: text });
@@ -849,7 +856,9 @@
         brainDot.className = 'brain-dot' + (len > 0 ? ' ok' : '');
     }
 
-    function showMemoryWarning() {
+    function showMemoryWarning(reason = '') {
+        document.getElementById('brainWarnText').textContent =
+            'Bộ não chưa được cập nhật lần này' + (reason ? ' — ' + reason : '.') ;
         brainWarnBanner.classList.add('show');
         brainDot.className = 'brain-dot warn';
     }
