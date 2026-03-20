@@ -766,11 +766,9 @@
 
             // Luôn hiện nội dung bộ não thật
             if (data.memoryUpdated === false) {
-                // Xác định đúng provider đang làm bộ não tóm tắt
-                const useCFMem  = document.getElementById('useCFMemoryToggle').checked;
-                const useCerMem = document.getElementById('useCerebrasMemoryToggle').checked;
-                const reason = useCerMem ? 'Cerebras gặp sự cố'
-                    : useCFMem ? 'Cloudflare gặp sự cố'
+                // Dùng memoryProvider từ backend — chính xác 100%
+                const reason = data.memoryProvider === 'cerebras' ? 'Cerebras gặp sự cố'
+                    : data.memoryProvider === 'cloudflare' ? 'Cloudflare gặp sự cố'
                     : 'Groq gặp sự cố';
                 showMemoryWarning(reason);
             } else {
