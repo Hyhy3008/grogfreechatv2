@@ -69,6 +69,7 @@ export default async function handler(req, res) {
             useCFMemory,        // dùng CF làm bộ não
             useCerebrasChat,    // dùng Cerebras làm AI chat (ưu tiên cao nhất)
             useCerebrasMemory,  // dùng Cerebras làm bộ não
+            clientTs,           // timestamp từ frontend (giờ local user)
         } = req.body;
 
         const targetGroqModel     = model || "llama-3.3-70b-versatile";
@@ -161,17 +162,21 @@ ${currentSummary}
 
             const memMaxTokens = Math.ceil(targetLength / 3) + 300;
 
-            // Timestamp ngắn gọn: HH:MM dd/MM
-            const now = new Date();
-            const ts = `${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')} ${String(now.getDate()).padStart(2,'0')}/${String(now.getMonth()+1).padStart(2,'0')}`;
+            // Timestamp từ frontend (giờ local user)
+            const ts = clientTs || new Date().toLocaleTimeString('vi-VN', {hour:'2-digit', minute:'2-digit'});
 
-            // Helper gọi đúng provider memory
+            // Helper gọi đúng provider memory — bắt mọi lỗi kể cả non-JSON
             const callMemory = async (sysPrompt, userMsg) => {
-                if (useCerebrasMemory)
-                    return callCerebras("llama3.1-8b", [{role:"system",content:sysPrompt},{role:"user",content:userMsg}], 0.2, memMaxTokens);
-                if (useCFMemory)
-                    return callCF(userMsg, sysPrompt, [], targetCFModel, memMaxTokens);
-                return callGroq("llama-3.1-8b-instant", [{role:"system",content:sysPrompt},{role:"user",content:userMsg}], 0.2, memMaxTokens);
+                try {
+                    if (useCerebrasMemory)
+                        return await callCerebras("llama3.1-8b", [{role:"system",content:sysPrompt},{role:"user",content:userMsg}], 0.2, memMaxTokens);
+                    if (useCFMemory)
+                        return await callCF(userMsg, sysPrompt, [], targetCFModel, memMaxTokens);
+                    return await callGroq("llama-3.1-8b-instant", [{role:"system",content:sysPrompt},{role:"user",content:userMsg}], 0.2, memMaxTokens);
+                } catch (e) {
+                    console.error("callMemory error:", e.message);
+                    return ""; // trả rỗng để fallback xử lý
+                }
             };
 
             // Quy tắc SHORT_TERM_LOG dùng chung
