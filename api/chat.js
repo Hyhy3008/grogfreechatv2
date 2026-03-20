@@ -5,9 +5,9 @@ export default async function handler(req, res) {
         return res.status(405).json({ error: 'Method Not Allowed' });
     }
 
-    const GROQ_API_KEY = process.env.GROQ_API_KEY;
-    const CF_WORKER_URL = "https://muddy-paper-3417.nhatanhd50.workers.dev/";
-    const CF_API_KEY    = "12345678";
+    const GROQ_API_KEY  = process.env.GROQ_API_KEY;
+    const CF_WORKER_URL = process.env.CF_WORKER_URL;   // vd: https://xxx.workers.dev/
+    const CF_API_KEY    = process.env.CF_API_KEY;      // secret bạn đặt trong wrangler
 
     // ── CỔNG LỌC: strip <think> khỏi MỌI output trước khi dùng ──────────
     const stripThink = (text = "") => {
@@ -24,6 +24,21 @@ export default async function handler(req, res) {
         });
         const data = await res.json();
         if (data.error) throw new Error(data.error.message);
+        return stripThink(data.choices?.[0]?.message?.content || "");
+    };
+
+    // ── HELPER: gọi Cerebras (OpenAI-compatible) ────────────────────────
+    const callCerebras = async (model, messages, temperature = 0.7, max_tokens = 2048) => {
+        const r = await fetch("https://api.cerebras.ai/v1/chat/completions", {
+            method: "POST",
+            headers: {
+                "Authorization": `Bearer ${process.env.CEREBRAS_API_KEY}`,
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify({ model, messages, temperature, max_tokens })
+        });
+        const data = await r.json();
+        if (data.error) throw new Error(data.error.message || JSON.stringify(data.error));
         return stripThink(data.choices?.[0]?.message?.content || "");
     };
 
@@ -46,14 +61,18 @@ export default async function handler(req, res) {
             history,
             currentSummary,
             maxMemoryLength,
-            model,           // Groq model name
-            cfModel,         // CF model name (tự điền)
+            model,              // Groq model name
+            cfModel,            // CF model name
+            cerebrasModel,      // Cerebras model name
             historyLimit,
-            useCFChat,       // boolean: dùng CF làm AI chat
-            useCFMemory,     // boolean: dùng CF làm bộ não tóm tắt
+            useCFChat,          // dùng CF làm AI chat
+            useCFMemory,        // dùng CF làm bộ não
+            useCerebrasChat,    // dùng Cerebras làm AI chat (ưu tiên cao nhất)
+            useCerebrasMemory,  // dùng Cerebras làm bộ não
         } = req.body;
 
-        const targetGroqModel    = model || "llama-3.3-70b-versatile";
+        const targetGroqModel     = model || "llama-3.3-70b-versatile";
+        const targetCerebrasModel = cerebrasModel || "qwen-3-235b-a22b-instruct-2507";
         const targetCFModel      = cfModel || "@cf/moonshotai/kimi-k2.5";
         const targetLength       = maxMemoryLength || 2000;
         const targetHistoryLimit = historyLimit || 10;
@@ -68,12 +87,19 @@ export default async function handler(req, res) {
 
         let aiReplyRaw = "";
 
-        if (useCFChat) {
-            // CF 256K: truyền full history, không cần inject bộ não vào system prompt
+        if (useCerebrasChat) {
+            // Cerebras: ưu tiên cao nhất, OpenAI-compatible, nhanh nhất
+            aiReplyRaw = await callCerebras(
+                targetCerebrasModel,
+                [{ role: "system", content: chatSystemPrompt }, ...tinyHistory, { role: "user", content: message }],
+                0.7, 2048
+            );
+        } else if (useCFChat) {
+            // CF 256K: full history, model tự nhớ
             const fullHistory = (history || []);
             aiReplyRaw = await callCF(message, chatSystemPrompt, fullHistory, targetCFModel, 2048);
         } else {
-            // Groq: dùng tinyHistory + bộ não inject vào system prompt
+            // Groq: mặc định
             aiReplyRaw = await callGroq(
                 targetGroqModel,
                 [{ role: "system", content: chatSystemPrompt }, ...tinyHistory, { role: "user", content: message }],
@@ -117,17 +143,18 @@ export default async function handler(req, res) {
             try {
                 let memContent = "";
 
-                if (useCFMemory) {
-                    // Dùng CF Worker để tóm tắt
-                    memContent = await callCF(
-                        memUserMsg,
-                        memSysPrompt,
-                        [],
-                        targetCFModel,
-                        1024
+                if (useCerebrasMemory) {
+                    // Cerebras: nhanh nhất cho tóm tắt
+                    memContent = await callCerebras(
+                        "llama3.1-8b",
+                        [{ role: "system", content: memSysPrompt }, { role: "user", content: memUserMsg }],
+                        0.2, 1024
                     );
+                } else if (useCFMemory) {
+                    // CF Worker để tóm tắt
+                    memContent = await callCF(memUserMsg, memSysPrompt, [], targetCFModel, 1024);
                 } else {
-                    // Dùng Groq — tránh reasoning model để không ra <think>
+                    // Groq — tránh reasoning model
                     const memModel = targetGroqModel.includes("qwen") || targetGroqModel.includes("deepseek")
                         ? "llama-3.3-70b-versatile"
                         : targetGroqModel;
@@ -157,7 +184,11 @@ export default async function handler(req, res) {
             newSummary,
             memoryUpdated,
             // Trả về flag để frontend biết đang dùng chế độ nào
-            mode: useCFChat ? "cf-256k" : useCFMemory ? "groq+cf-memory" : "groq"
+            mode: useCerebrasChat ? "cerebras"
+                : useCFChat ? "cf-256k"
+                : useCerebrasMemory ? "groq+cerebras-memory"
+                : useCFMemory ? "groq+cf-memory"
+                : "groq"
         });
 
     } catch (error) {
