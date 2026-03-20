@@ -158,33 +158,37 @@ ${currentSummary}
                 ? `\n\n--- TIN NHẮN SẮP BỊ XÓA ---\nUser: "${oldestPair[0]?.content}"\nAI: "${stripThink(oldestPair[1]?.content || "")}"`
                 : "";
 
+            // Khi overBudget: cắt bớt input tránh vượt max_tokens
+            const brainInput = isOverBudget
+                ? (currentSummary || "").slice(0, Math.floor(targetLength * 0.6))
+                : (currentSummary || "");
+
             const memoryMode = isOverBudget
-                ? `KHẨN: bộ não ${currentBrainSize} ký tự, VƯỢT giới hạn ${targetLength}. BẮT BUỘC cắt giảm:\n- USER_PROFILE: tên + nghề + sở thích (tối đa 2 dòng)\n- CURRENT_GOAL: 1 câu hoặc trống\n- KNOWLEDGE_GRAPH: tối đa 8 từ khóa\n- SHORT_TERM_LOG: tối đa 3 dòng gần nhất`
-                : `CẬP NHẬT: còn ${targetLength - currentBrainSize} ký tự (${100 - budgetUsedPct}% trống).\n- SHORT_TERM_LOG: tối đa 5 dòng gần nhất\n- Khi còn < 200 ký tự: gộp/cắt log cũ chủ động`;
+                ? `VƯỢT GIỚI HẠN: ${currentBrainSize}/${targetLength} ký tự. PHẢI nén xuống dưới ${targetLength}.\nHÀNH ĐỘNG BẮT BUỘC:\n- USER_PROFILE: 1 dòng tên+nghề+thích\n- CURRENT_GOAL: 1 dòng hoặc trống\n- KNOWLEDGE_GRAPH: tối đa 6 từ khóa quan trọng nhất\n- SHORT_TERM_LOG: tối đa 3 dòng dạng "- [chủ đề ngắn]"`
+                : `Còn ${targetLength - currentBrainSize} ký tự.\n- SHORT_TERM_LOG: tối đa 5 dòng dạng "- [chủ đề ngắn]" KHÔNG copy nguyên câu\n- Khi còn < 200 ký tự: gộp log cũ thành 1 dòng`;
 
-            const memSysPrompt = `Bạn là Memory Manager. Giới hạn cứng: ${targetLength} ký tự.\nTRẠNG THÁI: ${currentBrainSize}/${targetLength} (${budgetUsedPct}%).\n${memoryMode}\n\nQUY TẮC:\n1. Output PHẢI <= ${targetLength} ký tự.\n2. Ưu tiên: USER_PROFILE > KNOWLEDGE_GRAPH > log gần > log cũ.\n3. CHỈ trả về 4 section, KHÔNG thêm text nào khác.\n\nFORMAT:\n=== USER_PROFILE ===\n=== CURRENT_GOAL ===\n=== KNOWLEDGE_GRAPH ===\n=== SHORT_TERM_LOG ===`;
+            const memSysPrompt = `Bạn là Memory Manager. Giới hạn CỨNG: ${targetLength} ký tự.\nTRẠNG THÁI: ${currentBrainSize}/${targetLength} (${budgetUsedPct}%).\n${memoryMode}\n\nQUY TẮC TUYỆT ĐỐI:\n1. Output PHẢI <= ${targetLength} ký tự.\n2. SHORT_TERM_LOG: KHÔNG bê nguyên câu — chỉ ghi CHỦ ĐỀ ngắn.\n   ĐÚNG: "- Hỏi về du lịch Hà Nội"\n   SAI: "- User: tôi muốn đi... AI: Hà Nội có..."\n3. Ưu tiên: USER_PROFILE > KNOWLEDGE_GRAPH > log gần > log cũ.\n4. CHỈ trả về 4 section, KHÔNG thêm text nào khác.\n\nFORMAT:\n=== USER_PROFILE ===\n=== CURRENT_GOAL ===\n=== KNOWLEDGE_GRAPH ===\n=== SHORT_TERM_LOG ===`;
 
-            const memUserMsg = `BỘ NÃO HIỆN TẠI:\n${currentSummary || '(trống)'}${evictedContext}\n\nHỘI THOẠI VỪA XẢY RA:\nUser: "${message}"\nAI: "${aiReplyClean}"\n\nCập nhật bộ não. Output <= ${targetLength} ký tự.`;
+            const memUserMsg = `BỘ NÃO HIỆN TẠI:\n${brainInput || '(trống)'}${evictedContext}\n\nHỘI THOẠI MỚI:\nUser: "${message}"\nAI: "${aiReplyClean.slice(0, 300)}"\n\nCập nhật bộ não. Output <= ${targetLength} ký tự.`;
+
+            const memMaxTokens = Math.ceil(targetLength / 3) + 200;
 
             try {
                 let memContent = "";
 
                 if (useCerebrasMemory) {
-                    // Cerebras: nhanh nhất cho tóm tắt
                     memContent = await callCerebras(
                         "llama3.1-8b",
                         [{ role: "system", content: memSysPrompt }, { role: "user", content: memUserMsg }],
-                        0.2, 1024
+                        0.2, memMaxTokens
                     );
                 } else if (useCFMemory) {
-                    // CF Worker để tóm tắt
-                    memContent = await callCF(memUserMsg, memSysPrompt, [], targetCFModel, 1024);
+                    memContent = await callCF(memUserMsg, memSysPrompt, [], targetCFModel, memMaxTokens);
                 } else {
-                    // Groq memory luôn dùng 8B — nhẹ, nhanh, không ảnh hưởng rate limit chat
                     memContent = await callGroq(
                         "llama-3.1-8b-instant",
                         [{ role: "system", content: memSysPrompt }, { role: "user", content: memUserMsg }],
-                        0.2, 1024
+                        0.2, memMaxTokens
                     );
                 }
 
